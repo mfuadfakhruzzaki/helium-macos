@@ -13,7 +13,13 @@ runs:
       run: ./github_prepare_xcode.sh
       shell: bash
     - name: Cleanup Android Related Stuff
-      run: sudo rm -rf $ANDROID_HOME
+      run: |
+        sudo rm -rf $ANDROID_HOME
+        sudo rm -rf /Users/runner/hostedtoolcache/CodeQL || true
+        sudo rm -rf /Users/runner/hostedtoolcache/go || true
+        sudo rm -rf /Users/runner/hostedtoolcache/Ruby* || true
+        sudo rm -rf /Users/runner/hostedtoolcache/Java* || true
+        df -h
       shell: bash
     - name: Disable Spotlight
       run: sudo mdutil -a -i off
