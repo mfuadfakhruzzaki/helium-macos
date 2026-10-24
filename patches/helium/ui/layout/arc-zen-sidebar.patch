@@ -1011,19 +1011,18 @@
    registry->RegisterBooleanPref(prefs::kRestrictYouTubeCookiesDeletion, false);
 --- a/chrome/browser/ui/views/frame/browser_view.h
 +++ b/chrome/browser/ui/views/frame/browser_view.h
-@@ -128,6 +128,11 @@
- class WebContents;
- class WebContentsCloseHandler;
- }  // namespace content
+@@ -137,5 +137,10 @@ namespace views {
+ class NativeViewHost;
+ class WebView;
+ }
 +
 +namespace helium {
 +class ArcZenSidebarView;
 +class ArcZenSpaceController;
 +}  // namespace helium
  
- namespace ui {
- class ColorProvider;
-@@ -351,5 +356,12 @@ class BrowserView : public BrowserWindowInterface,
+ class BrowserView : public BrowserWindow
+@@ -351,5 +356,12 @@ class BrowserView : public BrowserWindow
    // Returns whether vertical tabs are aligned to the right edge.
    bool IsVerticalTabStripRightAligned() const;
 +
@@ -1036,7 +1035,7 @@
  
    // Returns whether the webapp frame toolbar should be drawn.
    bool ShouldDrawWebAppFrameToolbar() const;
-@@ -1256,5 +1268,8 @@ class BrowserView : public BrowserWindowInterface,
+@@ -1256,5 +1268,8 @@ class BrowserView : public BrowserWindow
    raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
        vertical_tab_strip_background_blur_backdrop_ = nullptr;
 +
@@ -1103,8 +1102,11 @@
    raw_ptr<InfoBarContainerView> infobar_container = nullptr;
 --- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
-@@ -850,2 +850,13 @@ BrowserViewTabbedLayoutImpl::CalculateProvisionalLayout
-   gfx::Rect unclipped_contents_region = params.visual_client_area;
+@@ -1048,6 +1048,18 @@ BrowserViewTabbedLayoutImpl::CalculatePrimaryLayout
+                     layout_data_->tab_strip_type == TabStripType::kVertical &&
+                         zen.ShouldLayoutVerticalTabStrip());
+   }
++
 +  if (views().arc_zen_sidebar_view && views().arc_zen_sidebar_view->GetVisible()) {
 +    const int sidebar_width = views().arc_zen_sidebar_view->GetPreferredSize().width();
 +    const bool right_aligned = delegate().IsVerticalTabStripRightAligned();
@@ -1116,7 +1118,9 @@
 +        params.visual_client_area.height());
 +    params.InsetHorizontal(sidebar_width, /*leading=*/!right_aligned);
 +  }
-   gfx::Rect contents_region = params.visual_client_area;
+ 
+   if (IsParentedTo(views().vertical_tab_strip_background_blur_backdrop,
+                    views().browser_view)) {
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
 @@ -1501,4 +1501,13 @@ void BrowserCommandController::HandleCommandWithDisposition
