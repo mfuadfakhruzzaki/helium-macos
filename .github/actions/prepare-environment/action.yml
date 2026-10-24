@@ -6,12 +6,6 @@ runs:
       uses: actions/setup-python@v6
       with:
         python-version: '3.13'
-    - name: Configure Cache Environment for sccache
-      uses: actions/github-script@v7
-      with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
     - name: Copy GitHub specific scripts to git-root folder
       run: cp -va ./.github/scripts/ ./ ; date +%s > ./epoch_job_start.txt
       shell: bash
