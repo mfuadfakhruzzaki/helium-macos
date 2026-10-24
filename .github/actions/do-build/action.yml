@@ -29,7 +29,7 @@ runs:
   using: composite
   steps:
     - name: Show sccache stats before build
-      run: sccache --show-stats
+      run: sccache --show-stats || true
       shell: bash
 
     - name: Build
@@ -40,7 +40,7 @@ runs:
       shell: bash
 
     - name: Show sccache stats after build
-      run: sccache --show-stats
+      run: sccache --show-stats || true
       shell: bash
 
     - name: Prepare archive of build as artifact
