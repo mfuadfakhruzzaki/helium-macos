@@ -1,0 +1,1145 @@
+--- /dev/null
++++ b/chrome/browser/ui/tabs/arc_zen_space_controller.h
+@@ -0,0 +1,97 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_TABS_ARC_ZEN_SPACE_CONTROLLER_H_
++#define CHROME_BROWSER_UI_TABS_ARC_ZEN_SPACE_CONTROLLER_H_
++
++#include <string>
++#include <vector>
++#include "base/memory/raw_ptr.h"
++#include "base/observer_list.h"
++#include "base/observer_list_types.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "url/gurl.h"
++
++class Browser;
++class PrefRegistrySimple;
++class PrefService;
++class TabStripModel;
++
++namespace content {
++class WebContents;
++}
++
++namespace helium {
++
++struct ArcZenSpace {
++  std::string id;
++  std::u16string name;
++  std::u16string emoji;
++  SkColor accent_color = SK_ColorTRANSPARENT;
++};
++
++class ArcZenSpaceController : public TabStripModelObserver {
++ public:
++  class Observer : public base::CheckedObserver {
++   public:
++    virtual void OnActiveSpaceChanged(const std::string& space_id) {}
++    virtual void OnSpacesUpdated() {}
++    virtual void OnEssentialsUpdated() {}
++  };
++
++  explicit ArcZenSpaceController(Browser* browser);
++  ArcZenSpaceController(const ArcZenSpaceController&) = delete;
++  ArcZenSpaceController& operator=(const ArcZenSpaceController&) = delete;
++  ~ArcZenSpaceController() override;
++
++  static void RegisterProfilePrefs(PrefRegistrySimple* registry);
++
++  // Space management
++  const std::vector<ArcZenSpace>& spaces() const { return spaces_; }
++  const std::string& active_space_id() const { return active_space_id_; }
++  const ArcZenSpace* GetActiveSpace() const;
++
++  void SwitchToSpace(const std::string& space_id);
++  void SwitchToNextSpace();
++  void SwitchToPreviousSpace();
++  void CreateSpace(const std::u16string& name,
++                   const std::u16string& emoji,
++                   SkColor accent_color);
++
++  // Tab-to-Space assignment
++  void AssignTabToSpace(content::WebContents* contents,
++                        const std::string& space_id);
++  std::string GetTabSpaceId(content::WebContents* contents) const;
++  bool IsTabVisibleInActiveSpace(content::WebContents* contents) const;
++
++  // Essentials (Grid of super-pinned tabs)
++  bool IsEssentialTab(content::WebContents* contents) const;
++  void ToggleEssentialTab(content::WebContents* contents);
++  bool HandleCloseAttemptOnEssentialTab(content::WebContents* contents);
++
++  void AddObserver(Observer* observer);
++  void RemoveObserver(Observer* observer);
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override;
++
++ private:
++  void LoadFromPrefs();
++  void SaveToPrefs();
++  void EnsureDefaultSpaces();
++
++  raw_ptr<Browser> browser_;
++  raw_ptr<PrefService> prefs_;
++  std::vector<ArcZenSpace> spaces_;
++  std::string active_space_id_;
++  base::ObserverList<Observer> observers_;
++};
++
++}  // namespace helium
++
++#endif  // CHROME_BROWSER_UI_TABS_ARC_ZEN_SPACE_CONTROLLER_H_
+--- /dev/null
++++ b/chrome/browser/ui/tabs/arc_zen_space_controller.cc
+@@ -0,0 +1,298 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/tabs/arc_zen_space_controller.h"
++
++#include "base/strings/utf_string_conversions.h"
++#include "base/supports_user_data.h"
++#include "base/values.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "components/prefs/pref_registry_simple.h"
++#include "components/prefs/pref_service.h"
++#include "components/prefs/scoped_user_pref_update.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/referrer.h"
++#include "ui/base/page_transition_types.h"
++
++namespace helium {
++
++namespace {
++
++constexpr char kPrefUnifiedSidebarEnabled[] =
++    "helium.browser.unified_sidebar_enabled";
++constexpr char kPrefSpacesList[] = "helium.browser.spaces_list";
++constexpr char kPrefActiveSpaceId[] = "helium.browser.active_space_id";
++
++const void* const kTabSpaceUserDataKey = &kTabSpaceUserDataKey;
++
++struct TabSpaceTag : public base::SupportsUserData::Data {
++  std::string space_id;
++  bool is_essential = false;
++  GURL essential_root_url;
++};
++
++TabSpaceTag* GetOrCreateTag(content::WebContents* contents) {
++  if (!contents) {
++    return nullptr;
++  }
++  auto* tag = static_cast<TabSpaceTag*>(
++      contents->GetUserData(kTabSpaceUserDataKey));
++  if (!tag) {
++    auto new_tag = std::make_unique<TabSpaceTag>();
++    tag = new_tag.get();
++    contents->SetUserData(kTabSpaceUserDataKey, std::move(new_tag));
++  }
++  return tag;
++}
++
++}  // namespace
++
++// static
++void ArcZenSpaceController::RegisterProfilePrefs(PrefRegistrySimple* registry) {
++  registry->RegisterBooleanPref(kPrefUnifiedSidebarEnabled, true);
++  registry->RegisterListPref(kPrefSpacesList);
++  registry->RegisterStringPref(kPrefActiveSpaceId, "space_default");
++}
++
++ArcZenSpaceController::ArcZenSpaceController(Browser* browser)
++    : browser_(browser), prefs_(browser->profile()->GetPrefs()) {
++  LoadFromPrefs();
++  EnsureDefaultSpaces();
++  browser_->tab_strip_model()->AddObserver(this);
++}
++
++ArcZenSpaceController::~ArcZenSpaceController() {
++  if (browser_ && browser_->tab_strip_model()) {
++    browser_->tab_strip_model()->RemoveObserver(this);
++  }
++}
++
++void ArcZenSpaceController::EnsureDefaultSpaces() {
++  if (!spaces_.empty()) {
++    return;
++  }
++  spaces_.push_back({"space_default", u"Personal", u"🏠",
++                     SkColorSetRGB(45, 55, 72)});
++  spaces_.push_back({"space_work", u"Work", u"⚡",
++                     SkColorSetRGB(49, 46, 129)});
++  spaces_.push_back({"space_research", u"Research", u"🧪",
++                     SkColorSetRGB(20, 83, 45)});
++  active_space_id_ = spaces_.front().id;
++  SaveToPrefs();
++}
++
++void ArcZenSpaceController::LoadFromPrefs() {
++  if (!prefs_) {
++    return;
++  }
++  active_space_id_ = prefs_->GetString(kPrefActiveSpaceId);
++  const base::Value::List& list = prefs_->GetList(kPrefSpacesList);
++  spaces_.clear();
++  for (const auto& item : list) {
++    if (!item.is_dict()) {
++      continue;
++    }
++    const auto& dict = item.GetDict();
++    ArcZenSpace space;
++    if (const auto* id = dict.FindString("id")) {
++      space.id = *id;
++    }
++    if (const auto* name = dict.FindString("name")) {
++      space.name = base::UTF8ToUTF16(*name);
++    }
++    if (const auto* emoji = dict.FindString("emoji")) {
++      space.emoji = base::UTF8ToUTF16(*emoji);
++    }
++    space.accent_color =
++        static_cast<SkColor>(dict.FindInt("color").value_or(0xFF2D3748));
++    if (!space.id.empty()) {
++      spaces_.push_back(std::move(space));
++    }
++  }
++}
++
++void ArcZenSpaceController::SaveToPrefs() {
++  if (!prefs_) {
++    return;
++  }
++  prefs_->SetString(kPrefActiveSpaceId, active_space_id_);
++  ScopedListPrefUpdate update(prefs_, kPrefSpacesList);
++  base::Value::List& list = update.Get();
++  list.clear();
++  for (const auto& space : spaces_) {
++    base::Value::Dict dict;
++    dict.Set("id", space.id);
++    dict.Set("name", base::UTF16ToUTF8(space.name));
++    dict.Set("emoji", base::UTF16ToUTF8(space.emoji));
++    dict.Set("color", static_cast<int>(space.accent_color));
++    list.Append(std::move(dict));
++  }
++}
++
++const ArcZenSpace* ArcZenSpaceController::GetActiveSpace() const {
++  for (const auto& space : spaces_) {
++    if (space.id == active_space_id_) {
++      return &space;
++    }
++  }
++  return spaces_.empty() ? nullptr : &spaces_.front();
++}
++
++void ArcZenSpaceController::SwitchToSpace(const std::string& space_id) {
++  if (active_space_id_ == space_id) {
++    return;
++  }
++  active_space_id_ = space_id;
++  SaveToPrefs();
++
++  // Activate the first visible tab in the target Space if current tab belongs
++  // to another Space and is not an Essential tab.
++  auto* model = browser_->tab_strip_model();
++  content::WebContents* active = model->GetActiveWebContents();
++  if (active && !IsTabVisibleInActiveSpace(active)) {
++    for (int i = 0; i < model->count(); ++i) {
++      content::WebContents* candidate = model->GetWebContentsAt(i);
++      if (IsTabVisibleInActiveSpace(candidate)) {
++        model->ActivateTabAt(i);
++        break;
++      }
++    }
++  }
++
++  for (Observer& obs : observers_) {
++    obs.OnActiveSpaceChanged(active_space_id_);
++  }
++}
++
++void ArcZenSpaceController::SwitchToNextSpace() {
++  if (spaces_.size() <= 1) {
++    return;
++  }
++  for (size_t i = 0; i < spaces_.size(); ++i) {
++    if (spaces_[i].id == active_space_id_) {
++      size_t next = (i + 1) % spaces_.size();
++      SwitchToSpace(spaces_[next].id);
++      return;
++    }
++  }
++}
++
++void ArcZenSpaceController::SwitchToPreviousSpace() {
++  if (spaces_.size() <= 1) {
++    return;
++  }
++  for (size_t i = 0; i < spaces_.size(); ++i) {
++    if (spaces_[i].id == active_space_id_) {
++      size_t prev = (i + spaces_.size() - 1) % spaces_.size();
++      SwitchToSpace(spaces_[prev].id);
++      return;
++    }
++  }
++}
++
++void ArcZenSpaceController::CreateSpace(const std::u16string& name,
++                                        const std::u16string& emoji,
++                                        SkColor accent_color) {
++  std::string id = "space_" + std::to_string(spaces_.size() + 1);
++  spaces_.push_back({id, name, emoji, accent_color});
++  SaveToPrefs();
++  for (Observer& obs : observers_) {
++    obs.OnSpacesUpdated();
++  }
++}
++
++void ArcZenSpaceController::AssignTabToSpace(content::WebContents* contents,
++                                             const std::string& space_id) {
++  if (auto* tag = GetOrCreateTag(contents)) {
++    tag->space_id = space_id;
++  }
++}
++
++std::string ArcZenSpaceController::GetTabSpaceId(
++    content::WebContents* contents) const {
++  if (!contents) {
++    return active_space_id_;
++  }
++  auto* tag = static_cast<TabSpaceTag*>(
++      contents->GetUserData(kTabSpaceUserDataKey));
++  if (!tag || tag->space_id.empty()) {
++    return active_space_id_;
++  }
++  return tag->space_id;
++}
++
++bool ArcZenSpaceController::IsTabVisibleInActiveSpace(
++    content::WebContents* contents) const {
++  if (IsEssentialTab(contents)) {
++    return true;  // Essentials are always visible across all Spaces
++  }
++  return GetTabSpaceId(contents) == active_space_id_;
++}
++
++bool ArcZenSpaceController::IsEssentialTab(
++    content::WebContents* contents) const {
++  if (!contents) {
++    return false;
++  }
++  auto* tag = static_cast<TabSpaceTag*>(
++      contents->GetUserData(kTabSpaceUserDataKey));
++  return tag && tag->is_essential;
++}
++
++void ArcZenSpaceController::ToggleEssentialTab(content::WebContents* contents) {
++  auto* tag = GetOrCreateTag(contents);
++  if (!tag) {
++    return;
++  }
++  tag->is_essential = !tag->is_essential;
++  if (tag->is_essential) {
++    tag->essential_root_url = contents->GetLastCommittedURL();
++  }
++  for (Observer& obs : observers_) {
++    obs.OnEssentialsUpdated();
++  }
++}
++
++bool ArcZenSpaceController::HandleCloseAttemptOnEssentialTab(
++    content::WebContents* contents) {
++  if (!IsEssentialTab(contents)) {
++    return false;  // Allow normal close
++  }
++  auto* tag = GetOrCreateTag(contents);
++  if (tag && tag->essential_root_url.is_valid() &&
++      contents->GetLastCommittedURL() != tag->essential_root_url) {
++    // Arc behavior: Ctrl+W on an Essential tab resets it to its root URL
++    contents->GetController().LoadURL(
++        tag->essential_root_url, content::Referrer(),
++        ui::PAGE_TRANSITION_AUTO_TOPLEVEL, std::string());
++  }
++  return true;  // Intercept and block closing the Essential tab!
++}
++
++void ArcZenSpaceController::AddObserver(Observer* observer) {
++  observers_.AddObserver(observer);
++}
++
++void ArcZenSpaceController::RemoveObserver(Observer* observer) {
++  observers_.RemoveObserver(observer);
++}
++
++void ArcZenSpaceController::OnTabStripModelChanged(
++    TabStripModel* tab_strip_model,
++    const TabStripModelChange& change,
++    const TabStripSelectionChange& selection) {
++  if (change.type() == TabStripModelChange::kInserted) {
++    for (const auto& contents : change.GetInsert()->contents) {
++      auto* tag = GetOrCreateTag(contents.contents);
++      if (tag && tag->space_id.empty()) {
++        tag->space_id = active_space_id_;
++      }
++    }
++  }
++}
++
++}  // namespace helium
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/arc_zen_sidebar_view.h
+@@ -0,0 +1,88 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_FRAME_ARC_ZEN_SIDEBAR_VIEW_H_
++#define CHROME_BROWSER_UI_VIEWS_FRAME_ARC_ZEN_SIDEBAR_VIEW_H_
++
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/ui/tabs/arc_zen_space_controller.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/views/view.h"
++
++class BrowserView;
++
++namespace views {
++class BoxLayoutView;
++class Label;
++}  // namespace views
++
++namespace helium {
++
++class ArcZenSidebarView : public views::View,
++                          public ArcZenSpaceController::Observer,
++                          public TabStripModelObserver {
++  METADATA_HEADER(ArcZenSidebarView, views::View)
++
++ public:
++  ArcZenSidebarView(BrowserView* browser_view,
++                    ArcZenSpaceController* space_controller);
++  ArcZenSidebarView(const ArcZenSidebarView&) = delete;
++  ArcZenSidebarView& operator=(const ArcZenSidebarView&) = delete;
++  ~ArcZenSidebarView() override;
++
++  // Reparents the browser's LocationBarView or custom VerticalTabStrip into
++  // the sidebar's designated slots.
++  void AttachLocationBar(views::View* location_bar_view);
++  void AttachVerticalTabStrip(views::View* vertical_tab_strip_view);
++
++  int GetPreferredSidebarWidth() const;
++  void SetCollapsed(bool collapsed);
++  bool is_collapsed() const { return is_collapsed_; }
++
++  // ArcZenSpaceController::Observer:
++  void OnActiveSpaceChanged(const std::string& space_id) override;
++  void OnSpacesUpdated() override;
++  void OnEssentialsUpdated() override;
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override;
++
++  // views::View:
++  gfx::Size CalculatePreferredSize(
++      const views::SizeBounds& available_size) const override;
++  void OnThemeChanged() override;
++
++ private:
++  void BuildLayout();
++  void RebuildEssentialsGrid();
++  void RebuildSpacesSwitcher();
++  void UpdateSidebarThemeAccent();
++  void OnNewTabClicked();
++
++  raw_ptr<BrowserView> browser_view_;
++  raw_ptr<ArcZenSpaceController> space_controller_;
++
++  raw_ptr<views::BoxLayoutView> header_row_ = nullptr;
++  raw_ptr<views::BoxLayoutView> url_bar_slot_ = nullptr;
++  raw_ptr<views::View> essentials_grid_container_ = nullptr;
++  raw_ptr<views::BoxLayoutView> tab_strip_slot_ = nullptr;
++  raw_ptr<views::BoxLayoutView> footer_spaces_row_ = nullptr;
++  raw_ptr<views::Label> active_space_label_ = nullptr;
++
++  int preferred_width_ = 260;
++  bool is_collapsed_ = false;
++
++  base::ScopedObservation<ArcZenSpaceController,
++                          ArcZenSpaceController::Observer>
++      space_observation_{this};
++};
++
++}  // namespace helium
++
++#endif  // CHROME_BROWSER_UI_VIEWS_FRAME_ARC_ZEN_SIDEBAR_VIEW_H_
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/arc_zen_sidebar_view.cc
+@@ -0,0 +1,300 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/views/frame/arc_zen_sidebar_view.h"
++
++#include "chrome/app/chrome_command_ids.h"
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/browser_commands.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/color/color_id.h"
++#include "ui/color/color_provider.h"
++#include "ui/gfx/color_utils.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/controls/button/md_text_button.h"
++#include "ui/views/controls/label.h"
++#include "ui/views/controls/separator.h"
++#include "ui/views/layout/box_layout.h"
++#include "ui/views/layout/box_layout_view.h"
++#include "ui/views/layout/flex_layout.h"
++#include "ui/views/layout/table_layout.h"
++
++namespace helium {
++
++ArcZenSidebarView::ArcZenSidebarView(BrowserView* browser_view,
++                                     ArcZenSpaceController* space_controller)
++    : browser_view_(browser_view), space_controller_(space_controller) {
++  BuildLayout();
++  space_observation_.Observe(space_controller_);
++  browser_view_->browser()->tab_strip_model()->AddObserver(this);
++}
++
++ArcZenSidebarView::~ArcZenSidebarView() {
++  if (browser_view_ && browser_view_->browser() &&
++      browser_view_->browser()->tab_strip_model()) {
++    browser_view_->browser()->tab_strip_model()->RemoveObserver(this);
++  }
++}
++
++void ArcZenSidebarView::BuildLayout() {
++  auto* root_layout = SetLayoutManager(std::make_unique<views::BoxLayout>(
++      views::BoxLayout::Orientation::kVertical, gfx::Insets::VH(10, 10), 8));
++
++  // 1. Header Row: Navigation Controls (Back, Forward, Reload) + Space Title
++  header_row_ = AddChildView(std::make_unique<views::BoxLayoutView>());
++  header_row_->SetOrientation(views::BoxLayout::Orientation::kHorizontal);
++  header_row_->SetBetweenChildSpacing(4);
++
++  auto add_nav_btn = [this](const std::u16string& text, int command_id) {
++    auto btn = std::make_unique<views::MdTextButton>(
++        base::BindRepeating(
++            [](Browser* b, int cmd) { chrome::ExecuteCommand(b, cmd); },
++            browser_view_->browser(), command_id),
++        text);
++    btn->SetCustomPadding(gfx::Insets::VH(4, 8));
++    header_row_->AddChildView(std::move(btn));
++  };
++
++  add_nav_btn(u"←", IDC_BACK);
++  add_nav_btn(u"→", IDC_FORWARD);
++  add_nav_btn(u"↻", IDC_RELOAD);
++
++  active_space_label_ =
++      header_row_->AddChildView(std::make_unique<views::Label>(u"Personal"));
++  active_space_label_->SetHorizontalAlignment(gfx::ALIGN_RIGHT);
++  header_row_->SetFlexForView(active_space_label_, 1);
++
++  // 2. Unified URL Bar Slot (Hosts LocationBarView inside the sidebar)
++  url_bar_slot_ = AddChildView(std::make_unique<views::BoxLayoutView>());
++  url_bar_slot_->SetOrientation(views::BoxLayout::Orientation::kVertical);
++  url_bar_slot_->SetBackground(views::CreateThemedRoundedRectBackground(
++      ui::kColorToolbarBackgroundSubtleEmphasis, 10.0f));
++  url_bar_slot_->SetInsideBorderInsets(gfx::Insets::VH(2, 4));
++
++  // 3. Essentials 3x3 Super-Pinned Grid Container
++  essentials_grid_container_ = AddChildView(std::make_unique<views::View>());
++
++  // 4. Arc-style Divider + "+ New Tab" Full-Width Button
++  AddChildView(std::make_unique<views::Separator>());
++
++  auto new_tab_btn = std::make_unique<views::MdTextButton>(
++      base::BindRepeating(&ArcZenSidebarView::OnNewTabClicked,
++                          base::Unretained(this)),
++      u"+  New Tab");
++  new_tab_btn->SetCustomPadding(gfx::Insets::VH(6, 10));
++  AddChildView(std::move(new_tab_btn));
++
++  // 5. Main Vertical Tab Strip Slot (Takes remaining vertical flex space)
++  tab_strip_slot_ = AddChildView(std::make_unique<views::BoxLayoutView>());
++  tab_strip_slot_->SetOrientation(views::BoxLayout::Orientation::kVertical);
++  root_layout->SetFlexForView(tab_strip_slot_, 1);
++
++  // 6. Footer Row: Spaces / Workspaces Switcher (🏠, ⚡, 🧪)
++  AddChildView(std::make_unique<views::Separator>());
++  footer_spaces_row_ = AddChildView(std::make_unique<views::BoxLayoutView>());
++  footer_spaces_row_->SetOrientation(
++      views::BoxLayout::Orientation::kHorizontal);
++  footer_spaces_row_->SetMainAxisAlignment(
++      views::BoxLayout::MainAxisAlignment::kCenter);
++  footer_spaces_row_->SetBetweenChildSpacing(6);
++
++  RebuildEssentialsGrid();
++  RebuildSpacesSwitcher();
++}
++
++void ArcZenSidebarView::AttachLocationBar(views::View* location_bar_view) {
++  if (!location_bar_view || !url_bar_slot_) {
++    return;
++  }
++  if (location_bar_view->parent() != url_bar_slot_) {
++    url_bar_slot_->AddChildView(location_bar_view);
++  }
++  InvalidateLayout();
++}
++
++void ArcZenSidebarView::AttachVerticalTabStrip(
++    views::View* vertical_tab_strip_view) {
++  if (!vertical_tab_strip_view || !tab_strip_slot_) {
++    return;
++  }
++  if (vertical_tab_strip_view->parent() != tab_strip_slot_) {
++    tab_strip_slot_->AddChildView(vertical_tab_strip_view);
++    tab_strip_slot_->SetFlexForView(vertical_tab_strip_view, 1);
++  }
++  InvalidateLayout();
++}
++
++void ArcZenSidebarView::RebuildEssentialsGrid() {
++  if (!essentials_grid_container_) {
++    return;
++  }
++  essentials_grid_container_->RemoveAllChildViews();
++
++  auto* model = browser_view_->browser()->tab_strip_model();
++  std::vector<int> essential_indices;
++  for (int i = 0; i < model->count(); ++i) {
++    content::WebContents* wc = model->GetWebContentsAt(i);
++    if (space_controller_->IsEssentialTab(wc) || model->IsTabPinned(i)) {
++      essential_indices.push_back(i);
++      if (essential_indices.size() >= 9) {
++        break;
++      }
++    }
++  }
++
++  essentials_grid_container_->SetVisible(!essential_indices.empty());
++  if (essential_indices.empty()) {
++    return;
++  }
++
++  auto grid_layout = std::make_unique<views::TableLayout>();
++  grid_layout
++      ->AddColumn(views::LayoutAlignment::kStretch,
++                  views::LayoutAlignment::kStretch, 1.0f,
++                  views::TableLayout::ColumnSize::kFixed, 0, 0)
++      .AddPaddingColumn(views::TableLayout::kFixedSize, 6)
++      .AddColumn(views::LayoutAlignment::kStretch,
++                 views::LayoutAlignment::kStretch, 1.0f,
++                 views::TableLayout::ColumnSize::kFixed, 0, 0)
++      .AddPaddingColumn(views::TableLayout::kFixedSize, 6)
++      .AddColumn(views::LayoutAlignment::kStretch,
++                 views::LayoutAlignment::kStretch, 1.0f,
++                 views::TableLayout::ColumnSize::kFixed, 0, 0);
++
++  size_t rows = (essential_indices.size() + 2) / 3;
++  for (size_t r = 0; r < rows; ++r) {
++    grid_layout->AddRows(1, views::TableLayout::kFixedSize, 40);
++    if (r + 1 < rows) {
++      grid_layout->AddPaddingRow(views::TableLayout::kFixedSize, 6);
++    }
++  }
++  essentials_grid_container_->SetLayoutManager(std::move(grid_layout));
++
++  for (size_t idx = 0; idx < rows * 3; ++idx) {
++    if (idx < essential_indices.size()) {
++      int tab_index = essential_indices[idx];
++      content::WebContents* wc = model->GetWebContentsAt(tab_index);
++      std::u16string host =
++          base::UTF8ToUTF16(wc->GetLastCommittedURL().host());
++      if (host.empty()) {
++        host = u"★";
++      } else if (host.size() > 3) {
++        host = host.substr(0, 3);
++      }
++
++      auto tile = std::make_unique<views::MdTextButton>(
++          base::BindRepeating(
++              [](TabStripModel* m, int i) {
++                if (i < m->count()) {
++                  m->ActivateTabAt(i);
++                }
++              },
++              model, tab_index),
++          host);
++      tile->SetTooltipText(wc->GetTitle());
++      essentials_grid_container_->AddChildView(std::move(tile));
++    } else {
++      essentials_grid_container_->AddChildView(std::make_unique<views::View>());
++    }
++  }
++  essentials_grid_container_->InvalidateLayout();
++}
++
++void ArcZenSidebarView::RebuildSpacesSwitcher() {
++  if (!footer_spaces_row_ || !space_controller_) {
++    return;
++  }
++  footer_spaces_row_->RemoveAllChildViews();
++
++  if (const auto* active = space_controller_->GetActiveSpace()) {
++    active_space_label_->SetText(active->emoji + u" " + active->name);
++  }
++
++  for (const auto& space : space_controller_->spaces()) {
++    auto btn = std::make_unique<views::MdTextButton>(
++        base::BindRepeating(&ArcZenSpaceController::SwitchToSpace,
++                            base::Unretained(space_controller_), space.id),
++        space.emoji);
++    btn->SetTooltipText(space.name);
++    btn->SetCustomPadding(gfx::Insets::VH(4, 10));
++    footer_spaces_row_->AddChildView(std::move(btn));
++  }
++
++  UpdateSidebarThemeAccent();
++}
++
++void ArcZenSidebarView::UpdateSidebarThemeAccent() {
++  if (!GetColorProvider() || !space_controller_) {
++    return;
++  }
++  SkColor base_bg = GetColorProvider()->GetColor(ui::kColorFrameActive);
++  if (const auto* active = space_controller_->GetActiveSpace()) {
++    if (active->accent_color != SK_ColorTRANSPARENT) {
++      base_bg = color_utils::AlphaBlend(active->accent_color, base_bg, 0.22f);
++    }
++  }
++  SetBackground(views::CreateSolidBackground(base_bg));
++  SchedulePaint();
++}
++
++void ArcZenSidebarView::OnNewTabClicked() {
++  chrome::ExecuteCommand(browser_view_->browser(), IDC_NEW_TAB);
++}
++
++int ArcZenSidebarView::GetPreferredSidebarWidth() const {
++  return is_collapsed_ ? 0 : preferred_width_;
++}
++
++void ArcZenSidebarView::SetCollapsed(bool collapsed) {
++  if (is_collapsed_ == collapsed) {
++    return;
++  }
++  is_collapsed_ = collapsed;
++  SetVisible(!is_collapsed_);
++  if (parent()) {
++    parent()->InvalidateLayout();
++  }
++}
++
++void ArcZenSidebarView::OnActiveSpaceChanged(const std::string& space_id) {
++  RebuildSpacesSwitcher();
++}
++
++void ArcZenSidebarView::OnSpacesUpdated() {
++  RebuildSpacesSwitcher();
++}
++
++void ArcZenSidebarView::OnEssentialsUpdated() {
++  RebuildEssentialsGrid();
++}
++
++void ArcZenSidebarView::OnTabStripModelChanged(
++    TabStripModel* tab_strip_model,
++    const TabStripModelChange& change,
++    const TabStripSelectionChange& selection) {
++  RebuildEssentialsGrid();
++}
++
++gfx::Size ArcZenSidebarView::CalculatePreferredSize(
++    const views::SizeBounds& available_size) const {
++  if (is_collapsed_) {
++    return gfx::Size(0, 0);
++  }
++  return gfx::Size(preferred_width_, 600);
++}
++
++void ArcZenSidebarView::OnThemeChanged() {
++  views::View::OnThemeChanged();
++  UpdateSidebarThemeAccent();
++}
++
++BEGIN_METADATA(ArcZenSidebarView)
++END_METADATA
++
++}  // namespace helium
+--- /dev/null
++++ b/chrome/browser/ui/views/omnibox/arc_zen_command_bar.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_OMNIBOX_ARC_ZEN_COMMAND_BAR_H_
++#define CHROME_BROWSER_UI_VIEWS_OMNIBOX_ARC_ZEN_COMMAND_BAR_H_
++
++#include "base/memory/raw_ptr.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/views/controls/textfield/textfield_controller.h"
++#include "ui/views/widget/widget_delegate.h"
++
++class Browser;
++
++namespace views {
++class Textfield;
++}
++
++namespace helium {
++
++class ArcZenCommandBarDelegateView : public views::WidgetDelegateView,
++                                     public views::TextfieldController {
++  METADATA_HEADER(ArcZenCommandBarDelegateView, views::WidgetDelegateView)
++
++ public:
++  ArcZenCommandBarDelegateView(Browser* browser, bool open_in_new_tab);
++  ArcZenCommandBarDelegateView(const ArcZenCommandBarDelegateView&) = delete;
++  ArcZenCommandBarDelegateView& operator=(const ArcZenCommandBarDelegateView&) =
++      delete;
++  ~ArcZenCommandBarDelegateView() override;
++
++  static void Show(Browser* browser, bool open_in_new_tab);
++
++  // views::TextfieldController:
++  bool HandleKeyEvent(views::Textfield* sender,
++                      const ui::KeyEvent& key_event) override;
++
++ private:
++  void ExecuteInput(const std::u16string& input);
++
++  raw_ptr<Browser> browser_;
++  bool open_in_new_tab_;
++  raw_ptr<views::Textfield> input_field_ = nullptr;
++};
++
++}  // namespace helium
++
++#endif  // CHROME_BROWSER_UI_VIEWS_OMNIBOX_ARC_ZEN_COMMAND_BAR_H_
+--- /dev/null
++++ b/chrome/browser/ui/views/omnibox/arc_zen_command_bar.cc
+@@ -0,0 +1,129 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/views/omnibox/arc_zen_command_bar.h"
++
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/search_engines/template_url_service_factory.h"
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/browser_navigator.h"
++#include "chrome/browser/ui/browser_navigator_params.h"
++#include "chrome/browser/ui/browser_window.h"
++#include "components/omnibox/browser/autocomplete_input.h"
++#include "components/omnibox/browser/autocomplete_match.h"
++#include "components/search_engines/template_url_service.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/color/color_id.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/background.h"
++#include "ui/views/border.h"
++#include "ui/views/controls/textfield/textfield.h"
++#include "ui/views/layout/box_layout.h"
++#include "ui/views/widget/widget.h"
++
++namespace helium {
++
++// static
++void ArcZenCommandBarDelegateView::Show(Browser* browser,
++                                        bool open_in_new_tab) {
++  if (!browser || !browser->window()) {
++    return;
++  }
++  auto* delegate = new ArcZenCommandBarDelegateView(browser, open_in_new_tab);
++  views::Widget::InitParams params(
++      views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
++      views::Widget::InitParams::TYPE_POPUP);
++  params.delegate = delegate;
++  params.parent = browser->window()->GetNativeWindow();
++  params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
++
++  views::Widget* widget = new views::Widget();
++  widget->Init(std::move(params));
++
++  gfx::Rect window_bounds = browser->window()->GetBounds();
++  constexpr int kBarWidth = 620;
++  constexpr int kBarHeight = 64;
++  gfx::Rect bar_bounds(
++      window_bounds.x() + (window_bounds.width() - kBarWidth) / 2,
++      window_bounds.y() + window_bounds.height() / 4, kBarWidth, kBarHeight);
++  widget->SetBounds(bar_bounds);
++  widget->Show();
++  delegate->input_field_->RequestFocus();
++}
++
++ArcZenCommandBarDelegateView::ArcZenCommandBarDelegateView(
++    Browser* browser,
++    bool open_in_new_tab)
++    : browser_(browser), open_in_new_tab_(open_in_new_tab) {
++  SetLayoutManager(std::make_unique<views::BoxLayout>(
++      views::BoxLayout::Orientation::kVertical, gfx::Insets::VH(12, 16)));
++  SetBackground(views::CreateThemedRoundedRectBackground(
++      ui::kColorDialogBackground, 14.0f));
++
++  input_field_ = AddChildView(std::make_unique<views::Textfield>());
++  input_field_->SetPlaceholderText(
++      u"Search or enter URL (Arc/Zen Command Bar)...");
++  input_field_->SetBorder(views::NullBorder());
++  input_field_->set_controller(this);
++}
++
++ArcZenCommandBarDelegateView::~ArcZenCommandBarDelegateView() = default;
++
++bool ArcZenCommandBarDelegateView::HandleKeyEvent(
++    views::Textfield* sender,
++    const ui::KeyEvent& key_event) {
++  if (key_event.type() != ui::EventType::kKeyPressed) {
++    return false;
++  }
++  if (key_event.key_code() == ui::VKEY_ESCAPE) {
++    GetWidget()->Close();
++    return true;
++  }
++  if (key_event.key_code() == ui::VKEY_RETURN) {
++    std::u16string text = sender->GetText();
++    GetWidget()->Close();
++    if (!text.empty()) {
++      ExecuteInput(text);
++    }
++    return true;
++  }
++  return false;
++}
++
++void ArcZenCommandBarDelegateView::ExecuteInput(const std::u16string& input) {
++  GURL target_url(input);
++  if (!target_url.is_valid()) {
++    if (input.find(u'.') != std::u16string::npos &&
++        input.find(u' ') == std::u16string::npos) {
++      target_url = GURL(u"https://" + input);
++    } else {
++      TemplateURLService* turl_service =
++          TemplateURLServiceFactory::GetForProfile(browser_->profile());
++      if (turl_service && turl_service->GetDefaultSearchProvider()) {
++        const TemplateURL* provider = turl_service->GetDefaultSearchProvider();
++        TemplateURLRef::SearchTermsArgs args(input);
++        std::string url_str = provider->url_ref().ReplaceSearchTerms(
++            args, turl_service->search_terms_data());
++        target_url = GURL(url_str);
++      }
++    }
++  }
++
++  if (target_url.is_valid()) {
++    NavigateParams nav_params(
++        browser_, target_url, ui::PAGE_TRANSITION_TYPED);
++    nav_params.disposition = open_in_new_tab_
++                                 ? WindowOpenDisposition::NEW_FOREGROUND_TAB
++                                 : WindowOpenDisposition::CURRENT_TAB;
++    Navigate(&nav_params);
++  }
++}
++
++BEGIN_METADATA(ArcZenCommandBarDelegateView)
++END_METADATA
++
++}  // namespace helium
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -3557,6 +3557,12 @@ static_library("ui") {
+       "views/frame/vertical_tab_strip_region_view.h",
+       "views/helium/frame_corner_radius.cc",
+       "views/helium/frame_corner_radius.h",
++      "tabs/arc_zen_space_controller.cc",
++      "tabs/arc_zen_space_controller.h",
++      "views/frame/arc_zen_sidebar_view.cc",
++      "views/frame/arc_zen_sidebar_view.h",
++      "views/omnibox/arc_zen_command_bar.cc",
++      "views/omnibox/arc_zen_command_bar.h",
+       "views/helium/native_frame_materials.cc",
+       "views/helium/native_frame_materials.h",
+     ]
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -87,6 +87,7 @@
+ #include "chrome/browser/themes/theme_service.h"
+ #include "chrome/browser/tips/core/tips_prefs.h"
+ #include "chrome/browser/tracing/chrome_tracing_delegate.h"
++#include "chrome/browser/ui/tabs/arc_zen_space_controller.h"
+ #include "chrome/browser/ui/browser_shortcuts/browser_shortcut_prefs.h"
+ #include "chrome/browser/ui/browser_ui_prefs.h"
+ #include "chrome/browser/ui/network_profile_bubble.h"
+@@ -1942,6 +1943,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+   PushMessagingUnsubscribedEntry::RegisterProfilePrefs(registry);
+   QuietNotificationPermissionUiState::RegisterProfilePrefs(registry);
+   regional_capabilities::prefs::RegisterProfilePrefs(registry);
++  helium::ArcZenSpaceController::RegisterProfilePrefs(registry);
+   browser_shortcuts::prefs::RegisterProfilePrefs(registry);
+   RegisterBrowserUserPrefs(registry);
+   registry->RegisterBooleanPref(prefs::kRestrictYouTubeCookiesDeletion, false);
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -128,6 +128,11 @@
+ class WebContents;
+ class WebContentsCloseHandler;
+ }  // namespace content
++
++namespace helium {
++class ArcZenSidebarView;
++class ArcZenSpaceController;
++}  // namespace helium
+ 
+ namespace ui {
+ class ColorProvider;
+@@ -351,5 +356,12 @@ class BrowserView : public BrowserWindowInterface,
+   // Returns whether vertical tabs are aligned to the right edge.
+   bool IsVerticalTabStripRightAligned() const;
++
++  helium::ArcZenSidebarView* arc_zen_sidebar_view() const {
++    return arc_zen_sidebar_view_;
++  }
++  helium::ArcZenSpaceController* arc_zen_space_controller() const {
++    return arc_zen_space_controller_.get();
++  }
+ 
+   // Returns whether the webapp frame toolbar should be drawn.
+   bool ShouldDrawWebAppFrameToolbar() const;
+@@ -1256,5 +1268,8 @@ class BrowserView : public BrowserWindowInterface,
+   raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
+       vertical_tab_strip_background_blur_backdrop_ = nullptr;
++
++  std::unique_ptr<helium::ArcZenSpaceController> arc_zen_space_controller_;
++  raw_ptr<helium::ArcZenSidebarView> arc_zen_sidebar_view_ = nullptr;
+ 
+   // The view responsible for housing the contents of the organizer panel.
+   raw_ptr<OrganizerTrayView> organizer_tray_ = nullptr;
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -171,6 +171,9 @@
+ #include "chrome/browser/ui/views/frame/contents_container_view.h"
+ #include "chrome/browser/ui/views/frame/contents_separator.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
++#include "chrome/browser/ui/tabs/arc_zen_space_controller.h"
++#include "chrome/browser/ui/views/frame/arc_zen_sidebar_view.h"
++#include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+ #include "chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h"
+ #include "chrome/browser/ui/views/frame/layout/browser_view_layout.h"
+ #include "chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.h"
+@@ -1090,6 +1093,12 @@ BrowserView::BrowserView(BrowserWindowInterface* browser,
+     }
+     vertical_tab_strip_region_view_ =
+         AddChildView(std::move(vertical_tab_strip_container));
++
++    arc_zen_space_controller_ =
++        std::make_unique<helium::ArcZenSpaceController>(browser_.get());
++    arc_zen_sidebar_view_ =
++        AddChildView(std::make_unique<helium::ArcZenSidebarView>(
++            this, arc_zen_space_controller_.get()));
+   } else {
+     horizontal_tab_strip_region_view_->InitializeTabStrip();
+   }
+@@ -1240,5 +1249,7 @@ BrowserView::~BrowserView() {
+   side_panel_content_transition_scrim_view_ = nullptr;
+   vertical_tab_strip_region_view_ = nullptr;
+   vertical_tab_strip_background_blur_backdrop_ = nullptr;
++  arc_zen_sidebar_view_ = nullptr;
++  arc_zen_space_controller_.reset();
+   organizer_tray_ = nullptr;
+   side_panel_ = nullptr;
+@@ -5313,6 +5324,13 @@ void BrowserView::AddedToWidget() {
+   layout_views.vertical_tab_strip_region_view = vertical_tab_strip_region_view_;
+   layout_views.vertical_tab_strip_background_blur_backdrop =
+       vertical_tab_strip_background_blur_backdrop_;
++  layout_views.arc_zen_sidebar_view = arc_zen_sidebar_view_;
++  if (arc_zen_sidebar_view_ && vertical_tab_strip_region_view_) {
++    arc_zen_sidebar_view_->AttachVerticalTabStrip(vertical_tab_strip_region_view_);
++  }
++  if (arc_zen_sidebar_view_ && toolbar_ && toolbar_->location_bar()) {
++    arc_zen_sidebar_view_->AttachLocationBar(toolbar_->location_bar());
++  }
+   layout_views.organizer_tray = organizer_tray_;
+   layout_views.toolbar = toolbar_;
+   layout_views.infobar_container = infobar_container_;
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+@@ -73,5 +73,6 @@ struct BrowserViewLayoutViews {
+   raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
+       vertical_tab_strip_background_blur_backdrop = nullptr;
+   raw_ptr<OrganizerTrayView> organizer_tray = nullptr;
++  raw_ptr<views::View> arc_zen_sidebar_view = nullptr;
+   raw_ptr<views::View> toolbar = nullptr;
+   raw_ptr<InfoBarContainerView> infobar_container = nullptr;
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -850,2 +850,13 @@ BrowserViewTabbedLayoutImpl::CalculateProvisionalLayout
+   gfx::Rect unclipped_contents_region = params.visual_client_area;
++  if (views().arc_zen_sidebar_view && views().arc_zen_sidebar_view->GetVisible()) {
++    const int sidebar_width = views().arc_zen_sidebar_view->GetPreferredSize().width();
++    const bool right_aligned = delegate().IsVerticalTabStripRightAligned();
++    const int sidebar_x = right_aligned ? params.visual_client_area.right() - sidebar_width : params.visual_client_area.x();
++    views().arc_zen_sidebar_view->SetBounds(
++        sidebar_x,
++        params.visual_client_area.y(),
++        sidebar_width,
++        params.visual_client_area.height());
++    params.InsetHorizontal(sidebar_width, /*leading=*/!right_aligned);
++  }
+   gfx::Rect contents_region = params.visual_client_area;
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -1501,4 +1501,13 @@ void BrowserCommandController::HandleCommandWithDisposition
+     case IDC_CLOSE_TAB: {
++      auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_);
++      if (browser_view && browser_view->arc_zen_space_controller()) {
++        content::WebContents* active_contents =
++            browser_->tab_strip_model()->GetActiveWebContents();
++        if (browser_view->arc_zen_space_controller()
++                ->HandleCloseAttemptOnEssentialTab(active_contents)) {
++          break;
++        }
++      }
+       CloseTab(browser_);
+       break;
+     }
+@@ -1700,3 +1711,9 @@ void BrowserCommandController::HandleCommandWithDisposition
+     case IDC_CTRL_S_SHORTCUT: {
++      auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_);
++      if (browser_view && browser_view->arc_zen_sidebar_view()) {
++        auto* sb = browser_view->arc_zen_sidebar_view();
++        sb->SetCollapsed(!sb->is_collapsed());
++        break;
++      }
+       PrefService* prefs = profile()->GetPrefs();
+       if (ShouldToggleVerticalCollapse(prefs)) {
