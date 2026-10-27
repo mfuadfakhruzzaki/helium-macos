@@ -17,10 +17,15 @@ on:
       os:
         required: true
         type: string
+      resume-from-run-id:
+        required: false
+        type: string
+        default: ""
 
 jobs:
   retrieve-resources:
     name: Retrieve resources required for building
+    if: ${{ inputs.resume-from-run-id == '' }}
     runs-on: ${{ inputs.os }}
     steps:
       - name: Clone repository
@@ -45,11 +50,14 @@ jobs:
 
   build_job_01:
     needs: retrieve-resources
+    if: ${{ always() && (inputs.resume-from-run-id != '' || needs.retrieve-resources.result == 'success') }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
       arch: ${{ inputs.arch }}
       os: ${{ inputs.os }}
+      resume: ${{ inputs.resume-from-run-id != '' }}
+      run-id: ${{ inputs.resume-from-run-id }}
 
   build_job_02:
     needs: build_job_01
@@ -134,6 +142,56 @@ jobs:
   build_job_10:
     needs: build_job_09
     if: ${{needs.build_job_09.outputs.status == 'running'}}
+    uses: ./.github/workflows/build-phase.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      os: ${{ inputs.os }}
+      resume: true
+
+  build_job_11:
+    needs: build_job_10
+    if: ${{needs.build_job_10.outputs.status == 'running'}}
+    uses: ./.github/workflows/build-phase.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      os: ${{ inputs.os }}
+      resume: true
+
+  build_job_12:
+    needs: build_job_11
+    if: ${{needs.build_job_11.outputs.status == 'running'}}
+    uses: ./.github/workflows/build-phase.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      os: ${{ inputs.os }}
+      resume: true
+
+  build_job_13:
+    needs: build_job_12
+    if: ${{needs.build_job_12.outputs.status == 'running'}}
+    uses: ./.github/workflows/build-phase.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      os: ${{ inputs.os }}
+      resume: true
+
+  build_job_14:
+    needs: build_job_13
+    if: ${{needs.build_job_13.outputs.status == 'running'}}
+    uses: ./.github/workflows/build-phase.yml
+    secrets: inherit
+    with:
+      arch: ${{ inputs.arch }}
+      os: ${{ inputs.os }}
+      resume: true
+
+  build_job_15:
+    needs: build_job_14
+    if: ${{needs.build_job_14.outputs.status == 'running'}}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
