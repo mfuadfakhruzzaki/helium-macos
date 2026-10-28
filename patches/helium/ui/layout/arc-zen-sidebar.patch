@@ -978,7 +978,7 @@
 +}  // namespace helium
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
-@@ -3557,6 +3557,12 @@ static_library("ui") {
+@@ -3559,6 +3559,12 @@ static_library("ui") {
        "views/frame/vertical_tab_strip_region_view.h",
        "views/helium/frame_corner_radius.cc",
        "views/helium/frame_corner_radius.h",
@@ -993,7 +993,7 @@
      ]
 --- a/chrome/browser/prefs/browser_prefs.cc
 +++ b/chrome/browser/prefs/browser_prefs.cc
-@@ -87,6 +87,7 @@
+@@ -88,6 +88,7 @@
  #include "chrome/browser/themes/theme_service.h"
  #include "chrome/browser/tips/core/tips_prefs.h"
  #include "chrome/browser/tracing/chrome_tracing_delegate.h"
@@ -1001,7 +1001,7 @@
  #include "chrome/browser/ui/browser_shortcuts/browser_shortcut_prefs.h"
  #include "chrome/browser/ui/browser_ui_prefs.h"
  #include "chrome/browser/ui/network_profile_bubble.h"
-@@ -1942,6 +1943,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
+@@ -1947,6 +1948,7 @@ void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry,
    PushMessagingUnsubscribedEntry::RegisterProfilePrefs(registry);
    QuietNotificationPermissionUiState::RegisterProfilePrefs(registry);
    regional_capabilities::prefs::RegisterProfilePrefs(registry);
@@ -1011,9 +1011,8 @@
    registry->RegisterBooleanPref(prefs::kRestrictYouTubeCookiesDeletion, false);
 --- a/chrome/browser/ui/views/frame/browser_view.h
 +++ b/chrome/browser/ui/views/frame/browser_view.h
-@@ -137,5 +137,10 @@ namespace views {
+@@ -128,4 +128,9 @@ namespace views {
  class NativeViewHost;
- class WebView;
  }
 +
 +namespace helium {
@@ -1022,7 +1021,7 @@
 +}  // namespace helium
  
  class BrowserView : public BrowserWindow
-@@ -351,5 +356,14 @@ class BrowserView : public BrowserWindow
+@@ -365,5 +370,14 @@ class BrowserView : public BrowserWindow
    // Returns whether vertical tabs are aligned to the right edge.
    bool IsVerticalTabStripRightAligned() const;
 +
@@ -1037,7 +1036,7 @@
  
    // Returns whether the webapp frame toolbar should be drawn.
    bool ShouldDrawWebAppFrameToolbar() const;
-@@ -1256,5 +1270,8 @@ class BrowserView : public BrowserWindow
+@@ -1313,5 +1327,8 @@ class BrowserView : public BrowserWindow
    raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
        vertical_tab_strip_background_blur_backdrop_ = nullptr;
 +
@@ -1048,7 +1047,7 @@
    raw_ptr<OrganizerTrayView> organizer_tray_ = nullptr;
 --- a/chrome/browser/ui/views/frame/browser_view.cc
 +++ b/chrome/browser/ui/views/frame/browser_view.cc
-@@ -171,6 +171,9 @@
+@@ -172,6 +172,9 @@
  #include "chrome/browser/ui/views/frame/contents_container_view.h"
  #include "chrome/browser/ui/views/frame/contents_separator.h"
  #include "chrome/browser/ui/views/frame/contents_web_view.h"
@@ -1058,7 +1057,7 @@
  #include "chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h"
  #include "chrome/browser/ui/views/frame/layout/browser_view_layout.h"
  #include "chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.h"
-@@ -1090,6 +1093,12 @@ BrowserView::BrowserView(BrowserWindowInterface* browser,
+@@ -1110,6 +1113,12 @@ BrowserView::BrowserView(BrowserWindowInterface* browser,
      }
      vertical_tab_strip_region_view_ =
          AddChildView(std::move(vertical_tab_strip_container));
@@ -1071,7 +1070,7 @@
    } else {
      horizontal_tab_strip_region_view_->InitializeTabStrip();
    }
-@@ -1240,5 +1249,7 @@ BrowserView::~BrowserView() {
+@@ -1272,5 +1281,7 @@ BrowserView::~BrowserView() {
    side_panel_content_transition_scrim_view_ = nullptr;
    vertical_tab_strip_region_view_ = nullptr;
    vertical_tab_strip_background_blur_backdrop_ = nullptr;
@@ -1079,7 +1078,7 @@
 +  arc_zen_space_controller_.reset();
    organizer_tray_ = nullptr;
    side_panel_ = nullptr;
-@@ -1765,5 +1776,20 @@ void BrowserView::ToggleZenModeTopChrome
+@@ -1758,5 +1769,20 @@ void BrowserView::ToggleZenModeTopChrome
    browser_->GetProfile()->GetPrefs()->SetBoolean(
        prefs::kHeliumZenModeTopChromePinned, !was_pinned);
  }
@@ -1100,7 +1099,7 @@
 +}
  
  views::Widget* BrowserView::GetWidgetForAnchoring() {
-@@ -5313,6 +5340,13 @@ void BrowserView::AddedToWidget() {
+@@ -5874,6 +5900,13 @@ void BrowserView::AddedToWidget() {
    layout_views.vertical_tab_strip_region_view = vertical_tab_strip_region_view_;
    layout_views.vertical_tab_strip_background_blur_backdrop =
        vertical_tab_strip_background_blur_backdrop_;
@@ -1116,7 +1115,7 @@
    layout_views.infobar_container = infobar_container_;
 --- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
-@@ -73,5 +73,6 @@ struct BrowserViewLayoutViews {
+@@ -72,5 +72,6 @@ struct BrowserViewLayoutViews {
    raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
        vertical_tab_strip_background_blur_backdrop = nullptr;
    raw_ptr<OrganizerTrayView> organizer_tray = nullptr;
@@ -1125,7 +1124,7 @@
    raw_ptr<InfoBarContainerView> infobar_container = nullptr;
 --- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
-@@ -1048,6 +1048,18 @@ BrowserViewTabbedLayoutImpl::CalculatePrimaryLayout
+@@ -1057,6 +1057,18 @@ BrowserViewTabbedLayoutImpl::CalculatePrimaryLayout
                      layout_data_->tab_strip_type == TabStripType::kVertical &&
                          zen.ShouldLayoutVerticalTabStrip());
    }
@@ -1146,7 +1145,7 @@
                     views().browser_view)) {
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -620,4 +620,9 @@ void BrowserCommandController::HandleCommandWithDisposition
+@@ -781,4 +781,9 @@ void BrowserCommandController::HandleCommandWithDisposition
      case IDC_CLOSE_TAB:
 +      if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
 +        if (browser_view->HandleCloseAttemptOnEssentialTab()) {
@@ -1156,7 +1155,7 @@
        base::RecordAction(base::UserMetricsAction("CloseTabByKey"));
        CloseTab(browser_);
        break;
-@@ -1520,4 +1525,10 @@ void BrowserCommandController::HandleCommandWithDisposition
+@@ -1515,4 +1520,10 @@ void BrowserCommandController::HandleCommandWithDisposition
      case IDC_CTRL_S_SHORTCUT: {
 +      if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
 +        if (browser_view->arc_zen_sidebar_view()) {
