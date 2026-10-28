@@ -1022,7 +1022,7 @@
 +}  // namespace helium
  
  class BrowserView : public BrowserWindow
-@@ -351,5 +356,12 @@ class BrowserView : public BrowserWindow
+@@ -351,5 +356,14 @@ class BrowserView : public BrowserWindow
    // Returns whether vertical tabs are aligned to the right edge.
    bool IsVerticalTabStripRightAligned() const;
 +
@@ -1032,10 +1032,12 @@
 +  helium::ArcZenSpaceController* arc_zen_space_controller() const {
 +    return arc_zen_space_controller_.get();
 +  }
++  void ToggleArcZenSidebarCollapse();
++  bool HandleCloseAttemptOnEssentialTab();
  
    // Returns whether the webapp frame toolbar should be drawn.
    bool ShouldDrawWebAppFrameToolbar() const;
-@@ -1256,5 +1268,8 @@ class BrowserView : public BrowserWindow
+@@ -1256,5 +1270,8 @@ class BrowserView : public BrowserWindow
    raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
        vertical_tab_strip_background_blur_backdrop_ = nullptr;
 +
@@ -1077,7 +1079,28 @@
 +  arc_zen_space_controller_.reset();
    organizer_tray_ = nullptr;
    side_panel_ = nullptr;
-@@ -5313,6 +5324,13 @@ void BrowserView::AddedToWidget() {
+@@ -1765,5 +1776,20 @@ void BrowserView::ToggleZenModeTopChrome
+   browser_->GetProfile()->GetPrefs()->SetBoolean(
+       prefs::kHeliumZenModeTopChromePinned, !was_pinned);
+ }
++
++void BrowserView::ToggleArcZenSidebarCollapse() {
++  if (arc_zen_sidebar_view_) {
++    arc_zen_sidebar_view_->SetCollapsed(!arc_zen_sidebar_view_->is_collapsed());
++  }
++}
++
++bool BrowserView::HandleCloseAttemptOnEssentialTab() {
++  if (!arc_zen_space_controller_) {
++    return false;
++  }
++  content::WebContents* active_contents =
++      browser_->tab_strip_model()->GetActiveWebContents();
++  return arc_zen_space_controller_->HandleCloseAttemptOnEssentialTab(active_contents);
++}
+ 
+ views::Widget* BrowserView::GetWidgetForAnchoring() {
+@@ -5313,6 +5340,13 @@ void BrowserView::AddedToWidget() {
    layout_views.vertical_tab_strip_region_view = vertical_tab_strip_region_view_;
    layout_views.vertical_tab_strip_background_blur_backdrop =
        vertical_tab_strip_background_blur_backdrop_;
@@ -1123,27 +1146,24 @@
                     views().browser_view)) {
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -1501,4 +1501,13 @@ void BrowserCommandController::HandleCommandWithDisposition
-     case IDC_CLOSE_TAB: {
-+      auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_);
-+      if (browser_view && browser_view->arc_zen_space_controller()) {
-+        content::WebContents* active_contents =
-+            browser_->tab_strip_model()->GetActiveWebContents();
-+        if (browser_view->arc_zen_space_controller()
-+                ->HandleCloseAttemptOnEssentialTab(active_contents)) {
+@@ -620,4 +620,9 @@ void BrowserCommandController::HandleCommandWithDisposition
+     case IDC_CLOSE_TAB:
++      if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++        if (browser_view->HandleCloseAttemptOnEssentialTab()) {
 +          break;
 +        }
 +      }
+       base::RecordAction(base::UserMetricsAction("CloseTabByKey"));
        CloseTab(browser_);
        break;
-     }
-@@ -1700,3 +1711,9 @@ void BrowserCommandController::HandleCommandWithDisposition
+@@ -1520,4 +1525,10 @@ void BrowserCommandController::HandleCommandWithDisposition
      case IDC_CTRL_S_SHORTCUT: {
-+      auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_);
-+      if (browser_view && browser_view->arc_zen_sidebar_view()) {
-+        auto* sb = browser_view->arc_zen_sidebar_view();
-+        sb->SetCollapsed(!sb->is_collapsed());
-+        break;
++      if (auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser_)) {
++        if (browser_view->arc_zen_sidebar_view()) {
++          browser_view->ToggleArcZenSidebarCollapse();
++          break;
++        }
 +      }
+       // In zen mode with VTS, Ctrl+S toggles the side chrome visibility
+       // instead of collapsing the tab strip.
        PrefService* prefs = profile()->GetPrefs();
-       if (ShouldToggleVerticalCollapse(prefs)) {

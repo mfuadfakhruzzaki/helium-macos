@@ -60,17 +60,34 @@ jobs:
       - name: Prepare release
         id: bake
         run: ./github_prepare_release.sh | tee -a github_actions_release.log
+      - name: Check if release assets exist
+        id: check_assets
+        run: |
+          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts --jq '.artifacts[].name' > artifacts.txt || true
+          cat artifacts.txt
+          if grep -q "\.dmg" artifacts.txt; then
+            echo "has_dmg=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_dmg=false" >> "$GITHUB_OUTPUT"
+            echo "Build is still in progress across multi-phases. No .dmg produced yet. Skipping release step."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Get built x86-64 binary
+        if: ${{ steps.check_assets.outputs.has_dmg == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.bake.outputs.x64_file_name }}
       - name: Get built arm64 binary
+        if: ${{ steps.check_assets.outputs.has_dmg == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.bake.outputs.arm64_file_name }}
       - name: Generate release note
+        if: ${{ steps.check_assets.outputs.has_dmg == 'true' }}
         run: ./github_generate_release_note.sh | tee -a github_actions_release.log
       - name: List deltas
+        if: ${{ steps.check_assets.outputs.has_dmg == 'true' }}
         id: list_deltas
         run: |
           {
@@ -79,6 +96,7 @@ jobs:
             echo EOF
           } >> "$GITHUB_OUTPUT"
       - name: Release Helium binaries
+        if: ${{ steps.check_assets.outputs.has_dmg == 'true' }}
         uses: imputnet/action-gh-release@v2.5
         with:
           body_path: ./github_release_note.md
